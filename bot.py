@@ -9,7 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 BOT_TOKEN = '8709382919:AAGcVpu8ddQLZW9SlG1CukMvzysWVyY2k3o'
-API_URL = 'https://cryptomfo.rf.gd/api/bot_worker.php'
+API_URL = 'https://cryptomfo.hhos.net/api/bot.php'
 API_SECRET = 'your_secret_key_here_change_me'
 
 bot = Bot(token=BOT_TOKEN)

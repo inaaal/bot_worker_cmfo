@@ -8,7 +8,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ============ КОНФИГ ============
 BOT_TOKEN = '8709382919:AAGcVpu8ddQLZW9SlG1CukMvzysWVyY2k3o'
 API_URL = 'https://cryptomfo.rf.gd/api/bot_worker.php'
 API_SECRET = 'your_secret_key_here_change_me'
@@ -17,14 +16,12 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ============ СОСТОЯНИЯ ============
 class ApplicationStates(StatesGroup):
     waiting_for_source = State()
     waiting_for_experience = State()
     waiting_for_time = State()
     waiting_for_withdraw_amount = State()
 
-# ============ API ЗАПРОСЫ ============
 async def api_request(action: str, chat_id: int = 0, data: dict = None):
     url = API_URL
     headers = {
@@ -39,7 +36,6 @@ async def api_request(action: str, chat_id: int = 0, data: dict = None):
         async with session.post(url, headers=headers, json=payload) as response:
             return await response.json()
 
-# ============ КЛАВИАТУРЫ ============
 def get_main_menu(role='worker'):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Моя статистика", callback_data="stats")],
@@ -72,14 +68,10 @@ def get_withdraw_keyboard(withdrawal_id):
         ]
     ])
 
-# ============ ОБРАБОТЧИКИ ============
-
-# /start
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     chat_id = message.chat.id
     
-    # Проверяем воркера
     result = await api_request('get_worker', chat_id)
     
     if result.get('success'):
@@ -92,7 +84,6 @@ async def cmd_start(message: types.Message):
         
         await message.answer(text, reply_markup=get_main_menu(user['role']), parse_mode="Markdown")
     else:
-        # Проверяем статус заявки
         status_result = await api_request('check_application_status', chat_id)
         
         if status_result.get('success'):
@@ -107,7 +98,6 @@ async def cmd_start(message: types.Message):
                 await message.answer("✅ Ваша заявка одобрена! Используйте /start для входа.")
                 return
         
-        # Начинаем анкету
         await api_request('create_application', chat_id)
         await message.answer(
             "📝 *Анкета воркера*\n\n"
@@ -117,7 +107,6 @@ async def cmd_start(message: types.Message):
         )
         await ApplicationStates.waiting_for_source.set()
 
-# Анкета - вопрос 1
 @dp.message(ApplicationStates.waiting_for_source)
 async def process_source(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -133,7 +122,6 @@ async def process_source(message: types.Message, state: FSMContext):
     )
     await state.set_state(ApplicationStates.waiting_for_experience)
 
-# Анкета - вопрос 2
 @dp.message(ApplicationStates.waiting_for_experience)
 async def process_experience(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -149,7 +137,6 @@ async def process_experience(message: types.Message, state: FSMContext):
     )
     await state.set_state(ApplicationStates.waiting_for_time)
 
-# Анкета - вопрос 3
 @dp.message(ApplicationStates.waiting_for_time)
 async def process_time(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -159,7 +146,6 @@ async def process_time(message: types.Message, state: FSMContext):
         'value': message.text
     })
     
-    # Отправляем заявку
     await api_request('submit_application', chat_id)
     
     await message.answer(
@@ -169,7 +155,6 @@ async def process_time(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# Обработка callback
 @dp.callback_query()
 async def handle_callback(callback: types.CallbackQuery):
     data = callback.data
@@ -177,7 +162,6 @@ async def handle_callback(callback: types.CallbackQuery):
     
     await callback.answer()
     
-    # Статистика
     if data == "stats":
         result = await api_request('get_stats', chat_id)
         if result.get('success'):
@@ -190,7 +174,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
         return
     
-    # Клиенты
     if data == "clients":
         result = await api_request('get_clients', chat_id)
         if result.get('success') and result['clients']:
@@ -204,7 +187,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text("👥 У вас пока нет клиентов.", reply_markup=get_main_menu())
         return
     
-    # Реферальная ссылка
     if data == "ref_link":
         result = await api_request('get_ref_link', chat_id)
         if result.get('success'):
@@ -212,7 +194,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
         return
     
-    # Заявка на выплату
     if data == "withdraw":
         await callback.message.edit_text(
             "💰 *Заявка на выплату*\n\n"
@@ -222,13 +203,11 @@ async def handle_callback(callback: types.CallbackQuery):
         await ApplicationStates.waiting_for_withdraw_amount.set()
         return
     
-    # Одобрение воркера
     if data.startswith("approve_"):
         worker_chat_id = int(data.split("_")[1])
         result = await api_request('approve_worker', 0, {'worker_chat_id': worker_chat_id})
         
         if result.get('success'):
-            # Уведомляем воркера
             await bot.send_message(
                 worker_chat_id,
                 f"🎉 *Поздравляем! Ваша заявка одобрена!*\n\n"
@@ -239,7 +218,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text("✅ Воркер одобрен!", reply_markup=get_main_menu('admin'))
         return
     
-    # Отклонение воркера
     if data.startswith("reject_"):
         worker_chat_id = int(data.split("_")[1])
         await api_request('reject_worker', 0, {'worker_chat_id': worker_chat_id})
@@ -251,7 +229,6 @@ async def handle_callback(callback: types.CallbackQuery):
         await callback.message.edit_text("❌ Воркер отклонен!", reply_markup=get_main_menu('admin'))
         return
     
-    # Заявки воркеров (админ)
     if data == "pending_workers":
         result = await api_request('get_pending_workers', 0)
         if result.get('success') and result['applications']:
@@ -274,7 +251,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text("📋 Нет заявок на рассмотрение.", reply_markup=get_main_menu('admin'))
         return
     
-    # Заявки на выплату (админ)
     if data == "pending_withdrawals":
         result = await api_request('get_pending_withdrawals', 0)
         if result.get('success') and result['withdrawals']:
@@ -292,7 +268,6 @@ async def handle_callback(callback: types.CallbackQuery):
             await callback.message.edit_text("💰 Нет заявок на выплату.", reply_markup=get_main_menu('admin'))
         return
 
-# Сумма для вывода
 @dp.message(ApplicationStates.waiting_for_withdraw_amount)
 async def process_withdraw_amount(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -317,7 +292,6 @@ async def process_withdraw_amount(message: types.Message, state: FSMContext):
     await state.clear()
     await cmd_start(message)
 
-# ============ ЗАПУСК ============
 async def main():
     print("🚀 Бот воркеров запущен!")
     await dp.start_polling(bot)

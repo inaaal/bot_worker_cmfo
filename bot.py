@@ -1,300 +1,284 @@
-import asyncio
 import json
-import aiohttp
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import urllib3
+from flask import Flask, request, jsonify
 
-BOT_TOKEN = '8709382919:AAGcVpu8ddQLZW9SlG1CukMvzysWVyY2k3o'
-API_URL = 'https://cryptomfo.hhos.net/api/bot.php'
-API_SECRET = 'inaaal'
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+app = Flask(__name__)
 
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+BOT_TOKEN   = '8709382919:AAGcVpu8ddQLZW9SlG1CukMvzysWVyY2k3o'
+WEBHOOK_URL = 'https://ВАШ-СЕРВИС.onrender.com/webhook'   
+API_URL     = 'https://cryptomfo.hhos.net/api/bot.php'
+API_SECRET  = 'inaaal'
 
-class ApplicationStates(StatesGroup):
-    waiting_for_source = State()
-    waiting_for_experience = State()
-    waiting_for_time = State()
-    waiting_for_withdraw_amount = State()
+FSM = {}
 
-async def api_request(action: str, chat_id: int = 0, data: dict = None):
-    url = API_URL
-    headers = {
-        'X-Bot-Secret': API_SECRET,
-        'Content-Type': 'application/json'
-    }
+def tg(method, **payload):
+    try:
+        return requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}",
+                             json=payload, timeout=30).json()
+    except Exception as e:
+        print('tg error:', e); return None
+
+def api_request(action, chat_id=0, data=None):
     payload = {'action': action, 'chat_id': chat_id}
     if data:
         payload.update(data)
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as response:
-            return await response.json()
+    try:
+        r = requests.post(API_URL, json=payload, timeout=60,
+                          headers={'X-Bot-Secret': API_SECRET,
+                                   'Content-Type': 'application/json'},
+                          verify=False)
+        return r.json()
+    except Exception as e:
+        print('api error:', repr(e)); return {}
+
+def send(chat_id, text, kb=None, parse_mode='Markdown'):
+    p = {'chat_id': chat_id, 'text': text, 'parse_mode': parse_mode,
+         'disable_web_page_preview': True}
+    if kb: p['reply_markup'] = kb
+    return tg('sendMessage', **p)
+
+def edit(chat_id, message_id, text, kb=None, parse_mode='Markdown'):
+    p = {'chat_id': chat_id, 'message_id': message_id, 'text': text,
+         'parse_mode': parse_mode, 'disable_web_page_preview': True}
+    if kb: p['reply_markup'] = kb
+    return tg('editMessageText', **p)
 
 def get_main_menu(role='worker'):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Моя статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="👥 Мои клиенты", callback_data="clients")],
-        [InlineKeyboardButton(text="🔗 Реферальная ссылка", callback_data="ref_link")],
-        [InlineKeyboardButton(text="💰 Заявка на выплату", callback_data="withdraw")]
-    ])
-    
+    kb = [[{'text': "📊 Моя статистика", 'callback_data': "stats"}],
+          [{'text': "👥 Мои клиенты", 'callback_data': "clients"}],
+          [{'text': "🔗 Реферальная ссылка", 'callback_data': "ref_link"}],
+          [{'text': "💰 Заявка на выплату", 'callback_data': "withdraw"}]]
     if role == 'admin':
-        keyboard.inline_keyboard.append([
-            InlineKeyboardButton(text="📋 Заявки воркеров", callback_data="pending_workers"),
-            InlineKeyboardButton(text="💰 Заявки на выплату", callback_data="pending_withdrawals")
-        ])
-    
-    return keyboard
+        kb.append([{'text': "📋 Заявки воркеров", 'callback_data': "pending_workers"},
+                   {'text': "💰 Заявки на выплату", 'callback_data': "pending_withdrawals"}])
+    return {'inline_keyboard': kb}
 
 def get_admin_keyboard(worker_chat_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve_{worker_chat_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{worker_chat_id}")
-        ]
-    ])
+    return {'inline_keyboard': [[
+        {'text': "✅ Одобрить", 'callback_data': f"approve_{worker_chat_id}"},
+        {'text': "❌ Отклонить", 'callback_data': f"reject_{worker_chat_id}"}
+    ]]}
 
-def get_withdraw_keyboard(withdrawal_id):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Одобрить", callback_data=f"withdraw_approve_{withdrawal_id}"),
-            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"withdraw_reject_{withdrawal_id}")
-        ]
-    ])
+def get_withdraw_keyboard(wid):
+    return {'inline_keyboard': [[
+        {'text': "✅ Одобрить", 'callback_data': f"withdraw_approve_{wid}"},
+        {'text': "❌ Отклонить", 'callback_data': f"withdraw_reject_{wid}"}
+    ]]}
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    chat_id = message.chat.id
-    
-    result = await api_request('get_worker', chat_id)
-    
+def cmd_start(chat_id):
+    result = api_request('get_worker', chat_id)
     if result.get('success'):
-        user = result['user']
-        worker = result['worker']
-        text = f"👋 Добро пожаловать, {user['email']}!\n\n"
-        text += f"📊 Ваша роль: *{user['role'].upper()}*\n"
-        text += f"💰 Бонусный баланс: ${worker['bonus_balance']:.2f}\n\n"
-        text += "Выберите действие:"
-        
-        await message.answer(text, reply_markup=get_main_menu(user['role']), parse_mode="Markdown")
-    else:
-        status_result = await api_request('check_application_status', chat_id)
-        
-        if status_result.get('success'):
-            status = status_result['status']
-            if status == 'pending' or status == 'submitted':
-                await message.answer("📝 Ваша заявка уже отправлена и ожидает рассмотрения.")
-                return
-            elif status == 'rejected':
-                await message.answer("❌ Ваша заявка была отклонена. Вы можете подать новую.")
-                return
-            elif status == 'approved':
-                await message.answer("✅ Ваша заявка одобрена! Используйте /start для входа.")
-                return
-        
-        await api_request('create_application', chat_id)
-        await message.answer(
-            "📝 *Анкета воркера*\n\n"
-            "Ответьте на несколько вопросов для регистрации.\n"
-            "Вопрос 1/3: Откуда вы узнали о нас?",
-            parse_mode="Markdown"
-        )
-        await ApplicationStates.waiting_for_source.set()
-
-@dp.message(ApplicationStates.waiting_for_source)
-async def process_source(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    await api_request('update_application', chat_id, {
-        'step': 2,
-        'field': 'source',
-        'value': message.text
-    })
-    
-    await message.answer(
-        "✅ Ответ сохранен!\n\n"
-        "Вопрос 2/3: Был ли у вас опыт в MFO или крипто-кредитовании?"
-    )
-    await state.set_state(ApplicationStates.waiting_for_experience)
-
-@dp.message(ApplicationStates.waiting_for_experience)
-async def process_experience(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    await api_request('update_application', chat_id, {
-        'step': 3,
-        'field': 'experience',
-        'value': message.text
-    })
-    
-    await message.answer(
-        "✅ Ответ сохранен!\n\n"
-        "Вопрос 3/3: Сколько времени готовы уделять работе в день?"
-    )
-    await state.set_state(ApplicationStates.waiting_for_time)
-
-@dp.message(ApplicationStates.waiting_for_time)
-async def process_time(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    await api_request('update_application', chat_id, {
-        'step': 4,
-        'field': 'time',
-        'value': message.text
-    })
-    
-    await api_request('submit_application', chat_id)
-    
-    await message.answer(
-        "✅ Анкета заполнена!\n\n"
-        "Ваша заявка отправлена на рассмотрение администратору.\n"
-        "Ожидайте ответа."
-    )
-    await state.clear()
-
-@dp.callback_query()
-async def handle_callback(callback: types.CallbackQuery):
-    data = callback.data
-    chat_id = callback.message.chat.id
-    
-    await callback.answer()
-    
-    if data == "stats":
-        result = await api_request('get_stats', chat_id)
-        if result.get('success'):
-            text = "📊 *Ваша статистика*\n\n"
-            text += f"👥 Клиентов: {result['total_clients']}\n"
-            text += f"⏳ Ожидают KYC: {result['pending_kyc']}\n"
-            text += f"✅ KYC подтвержден: {result['approved_kyc']}\n"
-            text += f"💰 Бонусный баланс: ${result['bonus_balance']:.2f}"
-            
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
-        return
-    
-    if data == "clients":
-        result = await api_request('get_clients', chat_id)
-        if result.get('success') and result['clients']:
-            text = "👥 *Мои клиенты*\n\n"
-            for client in result['clients']:
-                status = "✅" if client['kyc_status'] == 'approved' else "⏳" if client['kyc_status'] == 'pending' else "❌"
-                text += f"{status} #{client['user_id']} | {client['email']} | ${client['balance']:.2f}\n"
-            
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
-        else:
-            await callback.message.edit_text("👥 У вас пока нет клиентов.", reply_markup=get_main_menu())
-        return
-    
-    if data == "ref_link":
-        result = await api_request('get_ref_link', chat_id)
-        if result.get('success'):
-            text = f"🔗 *Ваша реферальная ссылка:*\n\n`{result['ref_link']}`"
-            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=get_main_menu())
-        return
-    
-    if data == "withdraw":
-        await callback.message.edit_text(
-            "💰 *Заявка на выплату*\n\n"
-            "Введите сумму которую хотите вывести (в USDT):",
-            parse_mode="Markdown"
-        )
-        await ApplicationStates.waiting_for_withdraw_amount.set()
-        return
-    
-    if data.startswith("approve_"):
-        worker_chat_id = int(data.split("_")[1])
-        result = await api_request('approve_worker', 0, {'worker_chat_id': worker_chat_id})
-        
-        if result.get('success'):
-            await bot.send_message(
-                worker_chat_id,
-                f"🎉 *Поздравляем! Ваша заявка одобрена!*\n\n"
-                f"🔗 Ваша реферальная ссылка:\n`https://cryptomfo.rf.gd/?ref={result['referral_code']}`\n\n"
-                f"📋 Используйте /start для открытия главного меню.",
-                parse_mode="Markdown"
-            )
-            await callback.message.edit_text("✅ Воркер одобрен!", reply_markup=get_main_menu('admin'))
-        return
-    
-    if data.startswith("reject_"):
-        worker_chat_id = int(data.split("_")[1])
-        await api_request('reject_worker', 0, {'worker_chat_id': worker_chat_id})
-        
-        await bot.send_message(
-            worker_chat_id,
-            "❌ К сожалению, ваша заявка была отклонена.\nВы можете попробовать подать заявку позже."
-        )
-        await callback.message.edit_text("❌ Воркер отклонен!", reply_markup=get_main_menu('admin'))
-        return
-    
-    if data == "pending_workers":
-        result = await api_request('get_pending_workers', 0)
-        if result.get('success') and result['applications']:
-            text = "📋 *Заявки воркеров*\n\n"
-            for app in result['applications']:
-                app_data = json.loads(app['data'] or '{}')
-                text += f"👤 Chat ID: {app['chat_id']}\n"
-                text += f"📌 Откуда: {app_data.get('source', 'N/A')}\n"
-                text += f"💼 Опыт: {app_data.get('experience', 'N/A')}\n"
-                text += f"⏰ Время: {app_data.get('time', 'N/A')}\n\n"
-                
-                await bot.send_message(
-                    chat_id,
-                    text,
-                    reply_markup=get_admin_keyboard(app['chat_id']),
-                    parse_mode="Markdown"
-                )
-            await callback.message.edit_text("📋 Заявки отправлены выше.", reply_markup=get_main_menu('admin'))
-        else:
-            await callback.message.edit_text("📋 Нет заявок на рассмотрение.", reply_markup=get_main_menu('admin'))
-        return
-    
-    if data == "pending_withdrawals":
-        result = await api_request('get_pending_withdrawals', 0)
-        if result.get('success') and result['withdrawals']:
-            text = "💰 *Заявки на выплату*\n\n"
-            for w in result['withdrawals']:
-                text += f"#{w['id']} | {w['email']} | ${w['amount']:.2f}\n"
-                await bot.send_message(
-                    chat_id,
-                    text,
-                    reply_markup=get_withdraw_keyboard(w['id']),
-                    parse_mode="Markdown"
-                )
-            await callback.message.edit_text("💰 Заявки отправлены выше.", reply_markup=get_main_menu('admin'))
-        else:
-            await callback.message.edit_text("💰 Нет заявок на выплату.", reply_markup=get_main_menu('admin'))
+        user = result['user']; worker = result['worker']
+        text = (f"👋 Добро пожаловать, {user['email']}!\n\n"
+                f"📊 Ваша роль: *{user['role'].upper()}*\n"
+                f"💰 Бонусный баланс: ${worker['bonus_balance']:.2f}\n\n"
+                f"Выберите действие:")
+        send(chat_id, text, get_main_menu(user['role']))
         return
 
-@dp.message(ApplicationStates.waiting_for_withdraw_amount)
-async def process_withdraw_amount(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
+    status_result = api_request('check_application_status', chat_id)
+    if status_result.get('success'):
+        st = status_result['status']
+        if st in ('pending', 'submitted'):
+            send(chat_id, "📝 Ваша заявка уже отправлена и ожидает рассмотрения."); return
+        if st == 'rejected':
+            send(chat_id, "❌ Ваша заявка была отклонена. Вы можете подать новую."); return
+        if st == 'approved':
+            send(chat_id, "✅ Ваша заявка одобрена! Используйте /start для входа."); return
+
+    api_request('create_application', chat_id)
+    send(chat_id,
+         "📝 *Анкета воркера*\n\n"
+         "Ответьте на несколько вопросов для регистрации.\n"
+         "Вопрос 1/3: Откуда вы узнали о нас?")
+    FSM[chat_id] = 'waiting_for_source'
+
+def process_source(chat_id, text):
+    api_request('update_application', chat_id,
+                {'step': 2, 'field': 'source', 'value': text})
+    send(chat_id, "✅ Ответ сохранен!\n\nВопрос 2/3: Был ли у вас опыт в MFO или крипто-кредитовании?")
+    FSM[chat_id] = 'waiting_for_experience'
+
+def process_experience(chat_id, text):
+    api_request('update_application', chat_id,
+                {'step': 3, 'field': 'experience', 'value': text})
+    send(chat_id, "✅ Ответ сохранен!\n\nВопрос 3/3: Сколько времени готовы уделять работе в день?")
+    FSM[chat_id] = 'waiting_for_time'
+
+def process_time(chat_id, text):
+    api_request('update_application', chat_id,
+                {'step': 4, 'field': 'time', 'value': text})
+    api_request('submit_application', chat_id)
+    send(chat_id, "✅ Анкета заполнена!\n\n"
+                  "Ваша заявка отправлена на рассмотрение администратору.\n"
+                  "Ожидайте ответа.")
+    FSM.pop(chat_id, None)
+
+def process_withdraw_amount(chat_id, text):
     try:
-        amount = float(message.text)
+        amount = float(text)
         if amount <= 0:
-            await message.answer("❌ Сумма должна быть больше 0. Попробуйте еще раз.")
-            return
-        
-        result = await api_request('create_withdrawal', chat_id, {'amount': amount})
-        
+            send(chat_id, "❌ Сумма должна быть больше 0. Попробуйте еще раз."); return
+        result = api_request('create_withdrawal', chat_id, {'amount': amount})
         if result.get('success'):
-            await message.answer(
-                "✅ Заявка на выплату создана!\n"
-                "Ожидайте подтверждения администратора."
-            )
+            send(chat_id, "✅ Заявка на выплату создана!\nОжидайте подтверждения администратора.")
         else:
-            await message.answer(f"❌ {result.get('message', 'Ошибка')}")
+            send(chat_id, f"❌ {result.get('message', 'Ошибка')}")
     except ValueError:
-        await message.answer("❌ Введите корректное число.")
-    
-    await state.clear()
-    await cmd_start(message)
+        send(chat_id, "❌ Введите корректное число."); return
+    FSM.pop(chat_id, None)
+    cmd_start(chat_id)
 
-async def main():
-    print("🚀 Бот воркеров запущен!")
-    await dp.start_polling(bot)
+def handle_message(msg):
+    chat_id = msg['chat']['id']
+    text = (msg.get('text') or '').strip()
+    state = FSM.get(chat_id)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    if text == '/start':
+        FSM.pop(chat_id, None)
+        cmd_start(chat_id); return
+
+    if state == 'waiting_for_source':
+        process_source(chat_id, text); return
+    if state == 'waiting_for_experience':
+        process_experience(chat_id, text); return
+    if state == 'waiting_for_time':
+        process_time(chat_id, text); return
+    if state == 'waiting_for_withdraw_amount':
+        process_withdraw_amount(chat_id, text); return
+
+def handle_callback(cb):
+    data = cb.get('data', '')
+    chat_id = cb['message']['chat']['id']
+    message_id = cb['message']['message_id']
+    tg('answerCallbackQuery', callback_query_id=cb['id'])
+
+    if data == "stats":
+        result = api_request('get_stats', chat_id)
+        if result.get('success'):
+            text = ("📊 *Ваша статистика*\n\n"
+                    f"👥 Клиентов: {result['total_clients']}\n"
+                    f"⏳ Ожидают KYC: {result['pending_kyc']}\n"
+                    f"✅ KYC подтвержден: {result['approved_kyc']}\n"
+                    f"💰 Бонусный баланс: ${result['bonus_balance']:.2f}")
+            edit(chat_id, message_id, text, get_main_menu())
+        return
+
+    if data == "clients":
+        result = api_request('get_clients', chat_id)
+        if result.get('success') and result.get('clients'):
+            text = "👥 *Мои клиенты*\n\n"
+            for c in result['clients']:
+                st = "✅" if c['kyc_status'] == 'approved' else "⏳" if c['kyc_status'] == 'pending' else "❌"
+                text += f"{st} #{c['user_id']} | {c['email']} | ${c['balance']:.2f}\n"
+            edit(chat_id, message_id, text, get_main_menu())
+        else:
+            edit(chat_id, message_id, "👥 У вас пока нет клиентов.", get_main_menu())
+        return
+
+    if data == "ref_link":
+        result = api_request('get_ref_link', chat_id)
+        if result.get('success'):
+            edit(chat_id, message_id,
+                 f"🔗 *Ваша реферальная ссылка:*\n\n`{result['ref_link']}`",
+                 get_main_menu())
+        return
+
+    if data == "withdraw":
+        edit(chat_id, message_id,
+             "💰 *Заявка на выплату*\n\nВведите сумму которую хотите вывести (в USDT):")
+        FSM[chat_id] = 'waiting_for_withdraw_amount'
+        return
+
+    if data.startswith("approve_"):
+        wcid = int(data.split("_")[1])
+        result = api_request('approve_worker', 0, {'worker_chat_id': wcid})
+        if result.get('success'):
+            send(wcid,
+                 f"🎉 *Поздравляем! Ваша заявка одобрена!*\n\n"
+                 f"🔗 Ваша реферальная ссылка:\n`https://cryptomfo.rf.gd/?ref={result['referral_code']}`\n\n"
+                 f"📋 Используйте /start для открытия главного меню.")
+            edit(chat_id, message_id, "✅ Воркер одобрен!", get_main_menu('admin'))
+        return
+
+    if data.startswith("reject_"):
+        wcid = int(data.split("_")[1])
+        api_request('reject_worker', 0, {'worker_chat_id': wcid})
+        send(wcid, "❌ К сожалению, ваша заявка была отклонена.\nВы можете попробовать подать заявку позже.")
+        edit(chat_id, message_id, "❌ Воркер отклонен!", get_main_menu('admin'))
+        return
+
+    if data == "pending_workers":
+        result = api_request('get_pending_workers', 0)
+        if result.get('success') and result.get('applications'):
+            for a in result['applications']:
+                app_data = {}
+                try: app_data = json.loads(a.get('data') or '{}')
+                except Exception: pass
+                text = (f"📋 *Заявка воркера*\n\n"
+                        f"👤 Chat ID: {a['chat_id']}\n"
+                        f"📌 Откуда: {app_data.get('source', 'N/A')}\n"
+                        f"💼 Опыт: {app_data.get('experience', 'N/A')}\n"
+                        f"⏰ Время: {app_data.get('time', 'N/A')}")
+                send(chat_id, text, get_admin_keyboard(a['chat_id']))
+            edit(chat_id, message_id, "📋 Заявки отправлены выше.", get_main_menu('admin'))
+        else:
+            edit(chat_id, message_id, "📋 Нет заявок на рассмотрение.", get_main_menu('admin'))
+        return
+
+    if data == "pending_withdrawals":
+        result = api_request('get_pending_withdrawals', 0)
+        if result.get('success') and result.get('withdrawals'):
+            for w in result['withdrawals']:
+                text = f"💰 *Заявка на выплату #{w['id']}*\n\n👤 {w['email']}\n💵 ${w['amount']:.2f}"
+                send(chat_id, text, get_withdraw_keyboard(w['id']))
+            edit(chat_id, message_id, "💰 Заявки отправлены выше.", get_main_menu('admin'))
+        else:
+            edit(chat_id, message_id, "💰 Нет заявок на выплату.", get_main_menu('admin'))
+        return
+
+    if data.startswith("withdraw_approve_"):
+        wid = int(data.split("_")[2])
+        api_request('approve_withdrawal', 0, {'withdrawal_id': wid})
+        edit(chat_id, message_id, "✅ Выплата одобрена!", get_main_menu('admin'))
+        return
+
+    if data.startswith("withdraw_reject_"):
+        wid = int(data.split("_")[2])
+        api_request('reject_withdrawal', 0, {'withdrawal_id': wid})
+        edit(chat_id, message_id, "❌ Выплата отклонена!", get_main_menu('admin'))
+        return
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    u = request.get_json(force=True, silent=True) or {}
+    if 'message' in u:
+        try: handle_message(u['message'])
+        except Exception as e: print('msg err', e)
+    if 'callback_query' in u:
+        try: handle_callback(u['callback_query'])
+        except Exception as e: print('cb err', e)
+    return 'OK', 200
+
+@app.route('/set_webhook')
+def set_webhook():
+    return jsonify(requests.get(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+        params={'url': WEBHOOK_URL}, timeout=15).json())
+
+@app.route('/webhook_info')
+def webhook_info():
+    return jsonify(requests.get(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo",
+        timeout=15).json())
+
+@app.route('/health')
+def health(): return 'OK', 200
+
+@app.route('/')
+def home(): return 'WORKERS bot', 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
